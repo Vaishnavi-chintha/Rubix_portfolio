@@ -94,7 +94,23 @@ loader.load(
       // Only add mesh objects (the actual cubie pieces)
       if (child.type === "Mesh" && child.name) {
         cubies.push(child);
-        console.log(`✅ Found cubie: ${child.name}`);
+
+        // Log position to understand the cube layout
+        const worldPos = new THREE.Vector3();
+        child.getWorldPosition(worldPos);
+
+        // Also check local position relative to cube center
+        const localPos = child.position;
+
+        // Check bounding box to understand actual geometry position
+        const bbox = new THREE.Box3().setFromObject(child);
+        const center = bbox.getCenter(new THREE.Vector3());
+
+        console.log(
+          `✅ Found cubie: ${child.name} - World Y: ${worldPos.y.toFixed(
+            2
+          )}, Local Y: ${localPos.y.toFixed(2)}, BBox Y: ${center.y.toFixed(2)}`
+        );
       }
     });
 
@@ -145,42 +161,55 @@ function updateScrambling() {
     return;
   }
 
-  // Simple Front face (F) rotation test
-  const rotationAmount = ((elapsed / scrambleDuration) * Math.PI) / 2; // 90 degrees
+  const halfDuration = scrambleDuration / 2; // 1.5 seconds each phase
 
-  console.log(
-    `🔄 Rotating Front face: ${((rotationAmount * 180) / Math.PI).toFixed(1)}°`
-  );
+  if (elapsed < halfDuration) {
+    // Phase 1: F rotation (orange pieces)
+    const rotationAmount = ((elapsed / halfDuration) * Math.PI) / 2; // 90 degrees over 1.5s
 
-  // Find and rotate all "Front" face cubies (positive Z world position)
-  let rotatedCount = 0;
-  cubies.forEach((cubie) => {
-    if (cubie) {
-      // Get world position to determine if it's on the front face
-      const worldPos = new THREE.Vector3();
-      cubie.getWorldPosition(worldPos);
+    console.log(
+      `🔄 Phase 1 - F rotation: ${((rotationAmount * 180) / Math.PI).toFixed(
+        1
+      )}°`
+    );
 
-      // Try a much lower threshold and also try rotating some cubies by name
-      // Let's rotate all cubies with 'o' (orange) in their name as a test
-      if (worldPos.z > 0.1 || (cubie.name && cubie.name.includes("o"))) {
-        // Simple rotation test - rotate around the Z-axis (front face normal)
+    // Rotate orange pieces (F face)
+    let rotatedCount = 0;
+    cubies.forEach((cubie) => {
+      if (cubie && cubie.name && cubie.name.includes("o")) {
         cubie.rotation.z = rotationAmount;
         rotatedCount++;
+      }
+    });
 
-        if (rotatedCount <= 5) {
-          // Log first few
-          console.log(
-            `🟦 Rotating ${cubie.name} (Z: ${worldPos.z.toFixed(2)}) by ${(
-              (rotationAmount * 180) /
-              Math.PI
-            ).toFixed(1)}°`
-          );
+    console.log(`🟠 F face pieces rotated: ${rotatedCount}`);
+  } else {
+    // Phase 2: U rotation (top layer pieces)
+    const phaseElapsed = elapsed - halfDuration;
+    const rotationAmount = ((phaseElapsed / halfDuration) * Math.PI) / 2; // 90 degrees over 1.5s
+
+    console.log(
+      `🔄 Phase 2 - U rotation: ${((rotationAmount * 180) / Math.PI).toFixed(
+        1
+      )}°`
+    );
+
+    // Rotate top layer pieces (U face) - pieces with BBox Y > 1.0
+    let rotatedCount = 0;
+    cubies.forEach((cubie) => {
+      if (cubie) {
+        const bbox = new THREE.Box3().setFromObject(cubie);
+        const center = bbox.getCenter(new THREE.Vector3());
+
+        if (center.y > 1.0) {
+          cubie.rotation.y = rotationAmount;
+          rotatedCount++;
         }
       }
-    }
-  });
+    });
 
-  console.log(`🔄 Total pieces rotated: ${rotatedCount}`);
+    console.log(`⬆️ U face pieces rotated: ${rotatedCount}`);
+  }
 
   // Keep gentle whole cube rotation
   if (cube) {
