@@ -161,60 +161,52 @@ function updateScrambling() {
     return;
   }
 
-  const halfDuration = scrambleDuration / 2; // 1.5 seconds each phase
+  // 2 phases, each 1.5 seconds
+  const phaseDuration = scrambleDuration / 2; // 1.5 seconds each phase
+  const phaseIndex = Math.floor(elapsed / phaseDuration);
+  const phaseElapsed = elapsed - phaseIndex * phaseDuration;
+  const rotationAmount = ((phaseElapsed / phaseDuration) * Math.PI) / 2; // 90 degrees per phase
 
-  if (elapsed < halfDuration) {
-    // Phase 1: F rotation (orange pieces)
-    const rotationAmount = ((elapsed / halfDuration) * Math.PI) / 2; // 90 degrees over 1.5s
-
+  if (phaseIndex === 0) {
+    // Phase 1: L turn - Blue pieces
     console.log(
-      `🔄 Phase 1 - F rotation: ${((rotationAmount * 180) / Math.PI).toFixed(
-        1
-      )}°`
+      `🔄 Phase 1 - L turn: ${((rotationAmount * 180) / Math.PI).toFixed(1)}°`
     );
 
-    // Rotate orange pieces (F face)
-    let rotatedCount = 0;
+    let bluerotatedCount = 0;
     cubies.forEach((cubie) => {
-      if (cubie && cubie.name && cubie.name.includes("o")) {
-        cubie.rotation.z = rotationAmount;
-        rotatedCount++;
-      }
-    });
-
-    console.log(`🟠 F face pieces rotated: ${rotatedCount}`);
-  } else {
-    // Phase 2: U rotation (top layer pieces)
-    const phaseElapsed = elapsed - halfDuration;
-    const rotationAmount = ((phaseElapsed / halfDuration) * Math.PI) / 2; // 90 degrees over 1.5s
-
-    console.log(
-      `🔄 Phase 2 - U rotation: ${((rotationAmount * 180) / Math.PI).toFixed(
-        1
-      )}°`
-    );
-
-    // Rotate top layer pieces (U face) - pieces with BBox Y > 1.0
-    let rotatedCount = 0;
-    cubies.forEach((cubie) => {
-      if (cubie) {
-        const bbox = new THREE.Box3().setFromObject(cubie);
-        const center = bbox.getCenter(new THREE.Vector3());
-
-        if (center.y > 1.0) {
-          cubie.rotation.y = rotationAmount;
-          rotatedCount++;
+      if (cubie && cubie.name) {
+        const name = cubie.name.toLowerCase();
+        if (name.startsWith("cube_b")) {
+          cubie.rotation.x = rotationAmount; // 90° down
+          bluerotatedCount++;
         }
       }
     });
+    console.log(`🔵 L (blue pieces) rotated: ${bluerotatedCount}`);
+  } else if (phaseIndex === 1) {
+    // Phase 2: R' turn - Green pieces
+    console.log(
+      `🔄 Phase 2 - R' turn: ${((-rotationAmount * 180) / Math.PI).toFixed(1)}°`
+    );
 
-    console.log(`⬆️ U face pieces rotated: ${rotatedCount}`);
+    let greenrotatedCount = 0;
+    cubies.forEach((cubie) => {
+      if (cubie && cubie.name) {
+        const name = cubie.name.toLowerCase();
+        if (name.startsWith("cube_g")) {
+          cubie.rotation.x = -rotationAmount; // 90° up (opposite direction)
+          greenrotatedCount++;
+        }
+      }
+    });
+    console.log(`🟢 R' (green pieces) rotated: ${greenrotatedCount}`);
   }
 
-  // Keep gentle whole cube rotation
-  if (cube) {
-    cube.rotation.y += 0.002;
-  }
+  // Remove whole cube rotation during scrambling
+  // if (cube) {
+  //   cube.rotation.y += 0.001;
+  // }
 }
 
 // === Loading Screen Functions ===
