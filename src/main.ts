@@ -12,7 +12,7 @@ const camera: THREE.PerspectiveCamera = new THREE.PerspectiveCamera(
   75,
   window.innerWidth / window.innerHeight,
   0.1,
-  1000
+  1000,
 );
 camera.position.set(5, 5, 10);
 
@@ -23,36 +23,29 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
 // === Lighting ===
-// Ambient light: base lighting everywhere
 const ambientLight = new THREE.AmbientLight(0xffffff, 2.0);
 scene.add(ambientLight);
 
-// Key light: main light from front-top
 const keyLight = new THREE.DirectionalLight(0xffffff, 0.8);
 keyLight.position.set(1, 2, 3);
 scene.add(keyLight);
 
-// Fill light: from left side
 const fillLight = new THREE.DirectionalLight(0xffffff, 0.6);
 fillLight.position.set(-3, 0, 1);
 scene.add(fillLight);
 
-// Right light: from right side
 const rightLight = new THREE.DirectionalLight(0xffffff, 0.6);
 rightLight.position.set(3, 0, 1);
 scene.add(rightLight);
 
-// Back light: from behind
 const backLight = new THREE.DirectionalLight(0xffffff, 0.5);
 backLight.position.set(0, 0, -3);
 scene.add(backLight);
 
-// Top light: from above
 const topLight = new THREE.DirectionalLight(0xffffff, 0.5);
 topLight.position.set(0, 3, 0);
 scene.add(topLight);
 
-// Bottom light: from below
 const bottomLight = new THREE.DirectionalLight(0xffffff, 0.4);
 bottomLight.position.set(0, -2, 0);
 scene.add(bottomLight);
@@ -71,12 +64,43 @@ const loader: GLTFLoader = new GLTFLoader();
 let cube: THREE.Object3D;
 let isLoading = true;
 let cubeRotationSpeed = 0.01;
-let scrambleTime = 0;
 let isScrambling = false;
 let cubies: THREE.Object3D[] = [];
+const SCRAMBLE_TOTAL_DURATION_MS = 4000;
+const UNSCRAMBLE_MOVE_DURATION_MS = 1100;
+const REVERSE_START_DELAY_MS = 2000;
 
-// const axesHelper = new THREE.AxesHelper(5);
-// scene.add(axesHelper);
+type Axis = "x" | "y" | "z";
+
+interface MoveStep {
+  label: string;
+  axis: Axis;
+  quarterTurns: number;
+  selector: () => THREE.Object3D[];
+}
+
+interface ActiveMove {
+  step: MoveStep;
+  pivot: THREE.Group;
+  cubies: THREE.Object3D[];
+  startTime: number;
+  durationMs: number;
+  targetAngle: number;
+  lastAngle: number;
+}
+
+let moveSteps: MoveStep[] = [];
+let forwardSteps: MoveStep[] = [];
+let currentMoveIndex = 0;
+let activeMove: ActiveMove | null = null;
+let isReversing = false;
+let scrambleMoveDuration = 550;
+let reverseStartAt: number | null = null;
+let isShowcasing = false;
+let showcaseAxis = new THREE.Vector3(0.3, 1, 0.2).normalize();
+let showcaseTargetAxis = showcaseAxis.clone();
+let nextAxisShiftAt = 0;
+let lastFrameTime = 0;
 
 loader.load(
   "/rubix3.0.glb",
@@ -88,125 +112,344 @@ loader.load(
     console.log("✅ Rubik cube loaded:", cube);
     scene.add(cube);
 
-    // Extract individual cubies from the model based on your naming system
     console.log("🔍 Analyzing cube structure...");
     cube.traverse((child) => {
-      // Only add mesh objects (the actual cubie pieces)
-      if (child.type === "Mesh" && child.name) {
+      if (child.type === "Mesh" && child.name && child.name !== "cube_center") {
         cubies.push(child);
 
-        // Log position to understand the cube layout
         const worldPos = new THREE.Vector3();
         child.getWorldPosition(worldPos);
 
-        // Also check local position relative to cube center
         const localPos = child.position;
 
-        // Check bounding box to understand actual geometry position
         const bbox = new THREE.Box3().setFromObject(child);
         const center = bbox.getCenter(new THREE.Vector3());
 
         console.log(
           `✅ Found cubie: ${child.name} - World Y: ${worldPos.y.toFixed(
-            2
-          )}, Local Y: ${localPos.y.toFixed(2)}, BBox Y: ${center.y.toFixed(2)}`
+            2,
+          )}, Local Y: ${localPos.y.toFixed(2)}, BBox Y: ${center.y.toFixed(2)}`,
         );
       }
     });
 
     console.log("🧩 Total cubies found:", cubies.length);
 
-    // Start scrambling after a brief moment
     setTimeout(() => {
       startScrambling();
     }, 500);
-
-    // Finish loading after scrambling is done
-    setTimeout(() => {
-      isLoading = false;
-      isScrambling = false;
-      hideLoadingScreen();
-    }, 4000);
   },
   undefined,
   (error: any) => {
     console.error("❌ Error loading cube:", error);
     isLoading = false;
     hideLoadingScreen();
-  }
+  },
 );
 
 // === Scrambling Functions ===
-let scrambleStartTime = 0;
-let scrambleDuration = 3000;
-let initialRotation = new THREE.Euler(0, 0, 0);
 
 function startScrambling() {
   isScrambling = true;
-  scrambleStartTime = Date.now();
+  currentMoveIndex = 0;
+  activeMove = null;
+  isReversing = false;
+  reverseStartAt = null;
 
-  if (cube) {
-    initialRotation.copy(cube.rotation);
+  forwardSteps = [
+    {
+      label: "green move",
+      axis: "x",
+      quarterTurns: -1,
+      selector: () =>
+        cubies.filter((c) => c.name.toLowerCase().startsWith("cube_g")),
+    },
+    {
+      label: "blue move",
+      axis: "x",
+      quarterTurns: 1,
+      selector: () =>
+        cubies.filter((c) => c.name.toLowerCase().startsWith("cube_b")),
+    },
+    {
+      label: "top move",
+      axis: "y",
+      quarterTurns: 1,
+      selector: () => detectTopLayerCubies(),
+    },
+    {
+      label: "bottom reverse move",
+      axis: "y",
+      quarterTurns: -1,
+      selector: () => detectBottomLayerCubies(),
+    },
+    {
+      label: "whole cube front-axis move",
+      axis: "z",
+      quarterTurns: -1,
+      selector: () => cubies,
+    },
+    {
+      label: "top reverse move",
+      axis: "y",
+      quarterTurns: -1,
+      selector: () => detectTopLayerCubies(),
+    },
+    {
+      label: "bottom move",
+      axis: "y",
+      quarterTurns: 1,
+      selector: () => detectBottomLayerCubies(),
+    },
+    {
+      label: "whole cube front-axis +90",
+      axis: "z",
+      quarterTurns: 1,
+      selector: () => cubies,
+    },
+    {
+      label: "top 180 move",
+      axis: "y",
+      quarterTurns: 2,
+      selector: () => detectTopLayerCubies(),
+    },
+    {
+      label: "middle row move",
+      axis: "y",
+      quarterTurns: 1,
+      selector: () => detectMiddleLayerCubies(),
+    },
+    {
+      label: "whole cube right-axis +90",
+      axis: "x",
+      quarterTurns: 1,
+      selector: () => cubies,
+    },
+    {
+      label: "top reverse move 2",
+      axis: "y",
+      quarterTurns: -1,
+      selector: () => detectTopLayerCubies(),
+    },
+  ];
+
+  scrambleMoveDuration = Math.max(
+    120,
+    SCRAMBLE_TOTAL_DURATION_MS / Math.max(1, forwardSteps.length),
+  );
+
+  moveSteps = [...forwardSteps];
+}
+
+function getCubieCenterY(cubie: THREE.Object3D): number {
+  const box = new THREE.Box3().setFromObject(cubie);
+  return box.getCenter(new THREE.Vector3()).y;
+}
+
+function detectTopLayerCubies(): THREE.Object3D[] {
+  if (!cubies.length) return [];
+
+  const centers = cubies.map((c) => getCubieCenterY(c));
+  const maxCenterY = Math.max(...centers);
+  const minCenterY = Math.min(...centers);
+  const centerTolerance = Math.max((maxCenterY - minCenterY) * 0.12, 0.01);
+
+  const topByCenter = cubies.filter(
+    (cubie) => getCubieCenterY(cubie) >= maxCenterY - centerTolerance,
+  );
+
+  // Include side-row pieces that physically touch the top plane.
+  const maxYValues = cubies.map((cubie) => {
+    const box = new THREE.Box3().setFromObject(cubie);
+    return box.max.y;
+  });
+  const maxPlaneY = Math.max(...maxYValues);
+  const minPlaneY = Math.min(...maxYValues);
+  const planeTolerance = Math.max((maxPlaneY - minPlaneY) * 0.08, 0.008);
+
+  const topByPlaneTouch = cubies.filter((cubie) => {
+    const box = new THREE.Box3().setFromObject(cubie);
+    return box.max.y >= maxPlaneY - planeTolerance;
+  });
+
+  return Array.from(new Set([...topByCenter, ...topByPlaneTouch]));
+}
+
+function detectBottomLayerCubies(): THREE.Object3D[] {
+  if (!cubies.length) return [];
+
+  const centers = cubies.map((c) => getCubieCenterY(c));
+  const minCenterY = Math.min(...centers);
+  const maxCenterY = Math.max(...centers);
+  const centerTolerance = Math.max((maxCenterY - minCenterY) * 0.12, 0.01);
+
+  const bottomByCenter = cubies.filter(
+    (cubie) => getCubieCenterY(cubie) <= minCenterY + centerTolerance,
+  );
+
+  // Include side-row pieces that physically touch the bottom plane.
+  const minYValues = cubies.map((cubie) => {
+    const box = new THREE.Box3().setFromObject(cubie);
+    return box.min.y;
+  });
+  const minPlaneY = Math.min(...minYValues);
+  const maxPlaneY = Math.max(...minYValues);
+  const planeTolerance = Math.max((maxPlaneY - minPlaneY) * 0.08, 0.008);
+
+  const bottomByPlaneTouch = cubies.filter((cubie) => {
+    const box = new THREE.Box3().setFromObject(cubie);
+    return box.min.y <= minPlaneY + planeTolerance;
+  });
+
+  return Array.from(new Set([...bottomByCenter, ...bottomByPlaneTouch]));
+}
+
+function detectMiddleLayerCubies(): THREE.Object3D[] {
+  if (!cubies.length) return [];
+
+  const centers = cubies.map((c) => getCubieCenterY(c));
+  const minCenterY = Math.min(...centers);
+  const maxCenterY = Math.max(...centers);
+  const midCenterY = (minCenterY + maxCenterY) / 2;
+  const tolerance = Math.max((maxCenterY - minCenterY) * 0.2, 0.01);
+
+  return cubies.filter(
+    (cubie) => Math.abs(getCubieCenterY(cubie) - midCenterY) <= tolerance,
+  );
+}
+
+function setAxisRotation(group: THREE.Group, axis: Axis, value: number): void {
+  if (axis === "x") group.rotation.x = value;
+  else if (axis === "y") group.rotation.y = value;
+  else group.rotation.z = value;
+}
+
+function snapToQuarter(angle: number): number {
+  const quarter = Math.PI / 2;
+  return Math.round(angle / quarter) * quarter;
+}
+
+function snapCubieRotation(cubie: THREE.Object3D): void {
+  cubie.rotation.set(
+    snapToQuarter(cubie.rotation.x),
+    snapToQuarter(cubie.rotation.y),
+    snapToQuarter(cubie.rotation.z),
+  );
+}
+
+function buildReverseSteps(steps: MoveStep[]): MoveStep[] {
+  return [...steps].reverse().map((step) => ({
+    label: `undo ${step.label}`,
+    axis: step.axis,
+    quarterTurns: -step.quarterTurns,
+    selector: step.selector,
+  }));
+}
+
+function beginNextMove(now: number): void {
+  if (!cube) return;
+
+  if (isReversing && reverseStartAt !== null && now < reverseStartAt) {
+    return;
   }
+
+  if (currentMoveIndex >= moveSteps.length) {
+    if (!isReversing) {
+      isReversing = true;
+      moveSteps = buildReverseSteps(forwardSteps);
+      currentMoveIndex = 0;
+      reverseStartAt = now + REVERSE_START_DELAY_MS;
+      console.log("⏸️ Pausing before undo...");
+      return;
+    }
+
+    reverseStartAt = null;
+    isScrambling = false;
+    isLoading = false;
+    hideLoadingScreen();
+    console.log("✅ Scramble + undo complete");
+    isShowcasing = true;
+    nextAxisShiftAt = now + 2200;
+    return;
+  }
+
+  const step = moveSteps[currentMoveIndex];
+  const selected = step.selector();
+  if (!selected.length) {
+    console.warn(`⚠️ ${step.label}: selected 0 cubies, skipping.`);
+    currentMoveIndex += 1;
+    beginNextMove(now);
+    return;
+  }
+
+  const pivot = new THREE.Group();
+  cube.add(pivot);
+  selected.forEach((cubie) => {
+    pivot.attach(cubie);
+  });
+
+  const activeDuration = isReversing
+    ? UNSCRAMBLE_MOVE_DURATION_MS
+    : scrambleMoveDuration;
+
+  activeMove = {
+    step,
+    pivot,
+    cubies: selected,
+    startTime: now,
+    targetAngle: step.quarterTurns * (Math.PI / 2),
+    lastAngle: 0,
+    durationMs: activeDuration,
+  };
+
+  console.log(`➡️ ${step.label}: ${selected.length} cubies`);
+}
+
+function finishActiveMove(): void {
+  if (!activeMove || !cube) return;
+
+  setAxisRotation(
+    activeMove.pivot,
+    activeMove.step.axis,
+    activeMove.targetAngle,
+  );
+
+  activeMove.cubies.forEach((cubie) => {
+    cube.attach(cubie);
+    snapCubieRotation(cubie);
+  });
+
+  cube.remove(activeMove.pivot);
+  activeMove = null;
+  currentMoveIndex += 1;
 }
 
 function updateScrambling() {
   if (!isScrambling || !cubies.length) return;
 
-  const currentTime = Date.now();
-  const elapsed = currentTime - scrambleStartTime;
+  const now = Date.now();
 
-  if (elapsed >= scrambleDuration) {
-    isScrambling = false;
+  if (!activeMove) {
+    beginNextMove(now);
     return;
   }
 
-  // 2 phases, each 1.5 seconds
-  const phaseDuration = scrambleDuration / 2; // 1.5 seconds each phase
-  const phaseIndex = Math.floor(elapsed / phaseDuration);
-  const phaseElapsed = elapsed - phaseIndex * phaseDuration;
-  const rotationAmount = ((phaseElapsed / phaseDuration) * Math.PI) / 2; // 90 degrees per phase
+  const elapsed = now - activeMove.startTime;
+  const progress = Math.min(1, elapsed / activeMove.durationMs);
+  const eased = 1 - Math.pow(1 - progress, 3);
+  const currentAngle = activeMove.targetAngle * eased;
+  const delta = currentAngle - activeMove.lastAngle;
 
-  if (phaseIndex === 0) {
-    // Phase 1: L turn - Blue pieces
-    console.log(
-      `🔄 Phase 1 - L turn: ${((rotationAmount * 180) / Math.PI).toFixed(1)}°`
-    );
+  const rotation = activeMove.pivot.rotation;
+  if (activeMove.step.axis === "x") rotation.x += delta;
+  else if (activeMove.step.axis === "y") rotation.y += delta;
+  else rotation.z += delta;
 
-    let bluerotatedCount = 0;
-    cubies.forEach((cubie) => {
-      if (cubie && cubie.name) {
-        const name = cubie.name.toLowerCase();
-        if (name.startsWith("cube_b")) {
-          cubie.rotation.x = rotationAmount; // 90° down
-          bluerotatedCount++;
-        }
-      }
-    });
-    console.log(`🔵 L (blue pieces) rotated: ${bluerotatedCount}`);
-  } else if (phaseIndex === 1) {
-    // Phase 2: R' turn - Green pieces
-    console.log(
-      `🔄 Phase 2 - R' turn: ${((-rotationAmount * 180) / Math.PI).toFixed(1)}°`
-    );
+  activeMove.lastAngle = currentAngle;
 
-    let greenrotatedCount = 0;
-    cubies.forEach((cubie) => {
-      if (cubie && cubie.name) {
-        const name = cubie.name.toLowerCase();
-        if (name.startsWith("cube_g")) {
-          cubie.rotation.x = -rotationAmount; // 90° up (opposite direction)
-          greenrotatedCount++;
-        }
-      }
-    });
-    console.log(`🟢 R' (green pieces) rotated: ${greenrotatedCount}`);
+  if (progress >= 1) {
+    finishActiveMove();
   }
-
-  // Remove whole cube rotation during scrambling
-  // if (cube) {
-  //   cube.rotation.y += 0.001;
-  // }
 }
 
 // === Loading Screen Functions ===
@@ -221,21 +464,36 @@ function hideLoadingScreen() {
 }
 
 // === Animation Loop ===
-let lastTime = 0;
-
-function animate(currentTime: number = 0): void {
+function animate(currentTime = 0): void {
   requestAnimationFrame(animate);
 
-  const deltaTime = (currentTime - lastTime) / 1000;
-  lastTime = currentTime;
+  const deltaSeconds = lastFrameTime
+    ? (currentTime - lastFrameTime) / 1000
+    : 0.016;
+  lastFrameTime = currentTime;
 
-  // Handle scrambling animation during loading
   if (isScrambling) {
     updateScrambling();
-  }
-  // Gentle auto-rotation when not scrambling during loading
-  else if (isLoading && cube) {
+  } else if (isLoading && cube) {
     cube.rotation.y += cubeRotationSpeed;
+  } else if (isShowcasing && cube) {
+    if (currentTime >= nextAxisShiftAt) {
+      showcaseTargetAxis.set(
+        Math.random() * 2 - 1,
+        Math.random() * 2 - 1,
+        Math.random() * 2 - 1,
+      );
+      if (showcaseTargetAxis.lengthSq() < 0.0001) {
+        showcaseTargetAxis.set(0.3, 1, 0.2);
+      }
+      showcaseTargetAxis.normalize();
+      nextAxisShiftAt = currentTime + 2200 + Math.random() * 2800;
+    }
+
+    // Ease axis transitions so rotation feels like a slow planetary wobble.
+    showcaseAxis.lerp(showcaseTargetAxis, Math.min(1, deltaSeconds * 0.35));
+    showcaseAxis.normalize();
+    cube.rotateOnAxis(showcaseAxis, 0.35 * deltaSeconds);
   }
 
   controls.update();
